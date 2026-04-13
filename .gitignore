@@ -1,0 +1,6 @@
+__pycache__
+datasets
+outputs_rgb
+outputs_tf_rgb
+outputs_multispectral
+outputs_tf_multispectral
