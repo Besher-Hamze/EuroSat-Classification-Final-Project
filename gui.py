@@ -24,6 +24,10 @@ import train as train_script
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
 
+RGB_EXTENSIONS = {".jpg", ".jpeg", ".png"}
+MS_EXTENSIONS = {".tif", ".tiff"}
+MS_REQUIRED_BANDS = 13
+
 class SmartAgriSys_GUI(ctk.CTk):
     def __init__(self):
         super().__init__()
@@ -120,6 +124,105 @@ class SmartAgriSys_GUI(ctk.CTk):
         while not self.log_queue.empty(): self.textbox.insert("end", f"{self.log_queue.get()}\n"); self.textbox.see("end")
         self.after(100, self.update_logs)
 
+    def _file_extension(self, path):
+        return os.path.splitext(path)[1].lower()
+
+    def _expected_image_hint(self, mode):
+        if mode == "rgb":
+            return (
+                "JPEG or PNG image (3-channel RGB)\n"
+                "Example: EuroSAT folder → *.jpg"
+            )
+        return (
+            "Sentinel-2 TIFF with 13 spectral bands\n"
+            "Example: EuroSATallBands folder → *.tif"
+        )
+
+    def validate_image_for_mode(self, path):
+        """Return (ok, error_message). Rejects wrong format for selected mode."""
+        mode = self.ds_menu.get()
+        ext = self._file_extension(path)
+        fname = os.path.basename(path)
+
+        if mode == "rgb":
+            if ext in MS_EXTENSIONS:
+                return False, (
+                    "Wrong image type!\n\n"
+                    f"Selected mode: RGB\n"
+                    f"Uploaded file: {fname} (Multispectral TIFF)\n\n"
+                    "Please upload:\n"
+                    f"  • {self._expected_image_hint('rgb')}\n\n"
+                    "Or switch Operational Platform to 'multispectral'."
+                )
+            if ext not in RGB_EXTENSIONS:
+                return False, (
+                    "Unsupported file format!\n\n"
+                    f"Selected mode: RGB\n"
+                    f"Uploaded file: {fname}\n\n"
+                    "Please upload:\n"
+                    f"  • {self._expected_image_hint('rgb')}\n\n"
+                    f"Allowed extensions: {', '.join(sorted(RGB_EXTENSIONS))}"
+                )
+            try:
+                with Image.open(path) as img:
+                    img = img.convert("RGB")
+                    w, h = img.size
+                    if w < 8 or h < 8:
+                        return False, (
+                            "Invalid RGB image!\n\n"
+                            f"File: {fname}\n"
+                            f"Size: {w}×{h} (too small)\n\n"
+                            "Please upload a valid EuroSAT RGB image (JPEG/PNG)."
+                        )
+            except Exception as e:
+                return False, (
+                    "Cannot read RGB image!\n\n"
+                    f"File: {fname}\n"
+                    f"Error: {e}\n\n"
+                    "Please upload a valid JPEG or PNG file."
+                )
+            return True, ""
+
+        # multispectral
+        if ext in RGB_EXTENSIONS:
+            return False, (
+                "Wrong image type!\n\n"
+                f"Selected mode: Multispectral\n"
+                f"Uploaded file: {fname} (RGB image)\n\n"
+                "Please upload:\n"
+                f"  • {self._expected_image_hint('multispectral')}\n\n"
+                "Or switch Operational Platform to 'rgb'."
+            )
+        if ext not in MS_EXTENSIONS:
+            return False, (
+                "Unsupported file format!\n\n"
+                f"Selected mode: Multispectral\n"
+                f"Uploaded file: {fname}\n\n"
+                "Please upload:\n"
+                f"  • {self._expected_image_hint('multispectral')}\n\n"
+                f"Allowed extensions: {', '.join(sorted(MS_EXTENSIONS))}"
+            )
+        try:
+            with rasterio.open(path) as src:
+                bands = src.count
+                if bands < MS_REQUIRED_BANDS:
+                    return False, (
+                        "Invalid multispectral image!\n\n"
+                        f"File: {fname}\n"
+                        f"Bands found: {bands}\n"
+                        f"Bands required: {MS_REQUIRED_BANDS}\n\n"
+                        "Please upload a Sentinel-2 TIFF from EuroSATallBands\n"
+                        "(13-band multispectral image)."
+                    )
+        except Exception as e:
+            return False, (
+                "Cannot read multispectral image!\n\n"
+                f"File: {fname}\n"
+                f"Error: {e}\n\n"
+                "Please upload a valid 13-band .tif file."
+            )
+        return True, ""
+
     def load_model_action(self):
         path = filedialog.askopenfilename(filetypes=[("H5 Model", "*.h5")])
         if path:
@@ -143,10 +246,24 @@ class SmartAgriSys_GUI(ctk.CTk):
         return heatmap.numpy()
 
     def select_predict_image(self):
-        path = filedialog.askopenfilename(filetypes=[("Satellite Files", "*.jpg *.png *.tif")])
-        if not path: return
+        mode = self.ds_menu.get()
+        if mode == "rgb":
+            filetypes = [("RGB Images", "*.jpg *.jpeg *.png"), ("All files", "*.*")]
+        else:
+            filetypes = [("Multispectral TIFF", "*.tif *.tiff"), ("All files", "*.*")]
+
+        path = filedialog.askopenfilename(filetypes=filetypes)
+        if not path:
+            return
+
+        ok, err = self.validate_image_for_mode(path)
+        if not ok:
+            self.log(f"[ERROR] Image rejected: {os.path.basename(path)} — wrong type for '{mode}' mode.")
+            messagebox.showerror("Wrong Image Type", err)
+            return
+
         try:
-            if path.lower().endswith('.tif'):
+            if self._file_extension(path) in MS_EXTENSIONS:
                 with rasterio.open(path) as src:
                     r = src.read(4); g = src.read(3); b = src.read(2)
                     rgb = np.dstack((r, g, b))
@@ -171,6 +288,12 @@ class SmartAgriSys_GUI(ctk.CTk):
         classes = ["AnnualCrop", "Forest", "HerbaceousVegetation", "Highway", "Industrial", 
                    "Pasture", "PermanentCrop", "Residential", "River", "SeaLake"]
         mode = self.ds_menu.get()
+
+        ok, err = self.validate_image_for_mode(path)
+        if not ok:
+            messagebox.showerror("Wrong Image Type", err)
+            return
+
         try:
             # 1. Processing Input
             if mode == "rgb":
